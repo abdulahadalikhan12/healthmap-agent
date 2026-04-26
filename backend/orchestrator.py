@@ -13,6 +13,7 @@ from backend.agents import (
     trust_agent,
     validator_agent,
 )
+from backend.config import settings
 from backend.core import mlflow_setup
 from backend.core.schemas import (
     Capabilities,
@@ -96,14 +97,22 @@ def run(query: str, *, top_k: int = 5, retrieve_k: int = 15) -> QueryResponse:
     with mlflow_setup.query_run(query):
         # 1. Query understanding.
         t0 = time.time()
-        parsed = query_agent.parse_query(query)
+        with mlflow_setup.stage_span("01_query_agent", {"query": query}) as s:
+            parsed = query_agent.parse_query(query)
+            if s is not None and hasattr(s, "set_outputs"):
+                s.set_outputs(parsed.model_dump())
         mlflow_setup.log_step("01_parsed_query", parsed.model_dump())
         mlflow_setup.log_metric("query_parse_seconds", time.time() - t0)
         steps.append(f"Parsed query - required: {parsed.required_capabilities}")
 
         # 2. Retrieval (wider net).
         t0 = time.time()
-        candidates = retrieval_agent.retrieve(parsed, query, top_k=retrieve_k)
+        with mlflow_setup.stage_span(
+            "02_retrieval_agent",
+            {"k": retrieve_k, "state": parsed.state, "rural": parsed.rural,
+             "backend": "mosaic" if settings.use_databricks else "faiss"},
+        ):
+            candidates = retrieval_agent.retrieve(parsed, query, top_k=retrieve_k)
         mlflow_setup.log_step(
             "02_retrieved",
             candidates[["facility_id", "name"]].to_dict(orient="records")
@@ -158,10 +167,12 @@ def run(query: str, *, top_k: int = 5, retrieve_k: int = 15) -> QueryResponse:
         )
 
         # 4. Validate + trust-score every candidate (cheap: rule-based by default).
-        validator_results = [validator_agent.validate(c, parsed, use_llm=False) for c in caps]
-        trust_results = [
-            trust_agent.score(c, e, v) for c, e, v in zip(caps, evs, validator_results)
-        ]
+        with mlflow_setup.stage_span("04_validator_agent", {"n": len(caps)}):
+            validator_results = [validator_agent.validate(c, parsed, use_llm=False) for c in caps]
+        with mlflow_setup.stage_span("04b_trust_agent", {"n": len(caps)}):
+            trust_results = [
+                trust_agent.score(c, e, v) for c, e, v in zip(caps, evs, validator_results)
+            ]
         mlflow_setup.log_step(
             "04_validator_trust",
             [

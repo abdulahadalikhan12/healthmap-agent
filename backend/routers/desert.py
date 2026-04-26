@@ -1,4 +1,11 @@
-"""GET /desert-map route — aggregates pre-extracted capabilities by state."""
+"""GET /desert-map route — aggregates capability gaps.
+
+Two execution modes:
+
+* **Local** (`USE_DATABRICKS=0`): read local parquet extractions.
+* **Databricks** (`USE_DATABRICKS=1` + warehouse): run Spark SQL directly on
+  the Delta tables in Unity Catalog. No parquet required.
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
@@ -19,19 +26,39 @@ _CAP_COLS = ("has_icu", "has_emergency", "has_surgery",
              "has_anesthesiologist", "has_oxygen")
 
 
+def _load_extractions_df() -> pd.DataFrame:
+    """Read from Delta via SQL warehouse on Databricks, else parquet."""
+    if settings.use_databricks and settings.dbx_warehouse_id:
+        from backend.databricks.sql import run_query
+
+        return run_query(
+            f"SELECT * FROM {settings.dbx_full_extractions_table}"
+        )
+    if not settings.extractions_path.exists():
+        raise HTTPException(503, "Extractions not built yet.")
+    return pd.read_parquet(settings.extractions_path)
+
+
+def _load_facilities_df() -> pd.DataFrame:
+    if settings.use_databricks and settings.dbx_warehouse_id:
+        from backend.databricks.sql import run_query
+
+        return run_query(
+            f"SELECT facility_id, pin, latitude, longitude, state "
+            f"FROM {settings.dbx_full_table}"
+        )
+    if not settings.processed_path.exists():
+        raise HTTPException(503, "Processed hospitals not built yet.")
+    return pd.read_parquet(settings.processed_path)
+
+
 @router.get("/desert-map", response_model=DesertMapResponse)
 def desert_map(
     min_total: int = Query(5, ge=0, description="Hide groups with fewer than this many facilities."),
     capability: str | None = Query(None, description="Optional filter: 'icu', 'surgery', etc."),
 ) -> DesertMapResponse:
-    """Aggregated view of capability gaps by state.
-
-    A `gap_ratio` close to 1 means most facilities in that state either
-    explicitly lack or have unconfirmed access to the capability.
-    """
-    if not settings.extractions_path.exists():
-        raise HTTPException(503, "Extractions not built yet.")
-    df = pd.read_parquet(settings.extractions_path)
+    """Aggregated view of capability gaps by state."""
+    df = _load_extractions_df()
     if "state" not in df.columns:
         raise HTTPException(500, "Extractions missing `state` column.")
 
@@ -56,7 +83,6 @@ def desert_map(
                     gap_ratio=round(missing / total, 3),
                 )
             )
-    # Sort: worst gaps (highest ratio) first.
     gaps.sort(key=lambda g: g.gap_ratio, reverse=True)
     return DesertMapResponse(gaps=gaps)
 
@@ -67,18 +93,10 @@ def desert_map_pins(
     capability: str = Query("icu", description="Capability: icu, emergency, surgery, anesthesiologist, oxygen"),
     top: int = Query(40, ge=1, le=200, description="Return up to this many highest-risk PINs."),
 ) -> PinDesertMapResponse:
-    """PIN-level medical desert / crisis zones for dynamic mapping.
+    """PIN-level medical desert / crisis zones for dynamic mapping."""
+    ex = _load_extractions_df()
+    pr = _load_facilities_df()
 
-    Joins extraction capabilities with processed lat/lng + PIN. `risk` is the
-    fraction of facilities in that PIN that are `no` or `uncertain` on the axis.
-    """
-    if not settings.extractions_path.exists():
-        raise HTTPException(503, "Extractions not built yet.")
-    if not settings.processed_path.exists():
-        raise HTTPException(503, "Processed hospitals not built yet.")
-
-    ex = pd.read_parquet(settings.extractions_path)
-    pr = pd.read_parquet(settings.processed_path)
     cap = capability.lower()
     if not cap.startswith("has_"):
         cap = f"has_{cap}"
@@ -90,6 +108,7 @@ def desert_map_pins(
         pr[["facility_id", "pin", "latitude", "longitude", "state"]],
         on="facility_id",
         how="left",
+        suffixes=("", "_src"),
     )
     merged["pin"] = merged["pin"].fillna("").astype(str).str.strip()
     merged = merged[merged["pin"].str.len() > 0]
@@ -105,17 +124,18 @@ def desert_map_pins(
             continue
         miss = int(((sub[key] == "no") | (sub[key] == "uncertain")).sum())
         risk = round(miss / n, 3) if n else 0.0
-        st_series = sub["state"].dropna()
+        state_col = "state_src" if "state_src" in sub.columns else "state"
+        st_series = sub[state_col].dropna() if state_col in sub.columns else pd.Series(dtype=object)
         stv: str | None
         if len(st_series):
             s0 = st_series.iloc[0]
             stv = None if s0 is None or (isinstance(s0, float) and pd.isna(s0)) else str(s0)
         else:
             stv = None
-        lat = sub["latitude"].dropna()
-        lng = sub["longitude"].dropna()
-        c_lat = float(lat.mean()) if len(lat) else None
-        c_lng = float(lng.mean()) if len(lng) else None
+        lat = sub["latitude"].dropna() if "latitude" in sub.columns else pd.Series(dtype=float)
+        lng = sub["longitude"].dropna() if "longitude" in sub.columns else pd.Series(dtype=float)
+        c_lat = float(lat.astype(float).mean()) if len(lat) else None
+        c_lng = float(lng.astype(float).mean()) if len(lng) else None
         zones.append(
             PinDesertGap(
                 pin=pin_s,

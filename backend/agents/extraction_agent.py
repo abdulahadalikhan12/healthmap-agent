@@ -88,6 +88,23 @@ def extract_one(notes: str) -> tuple[Capabilities, Evidence]:
 
 @lru_cache(maxsize=1)
 def _load_extractions() -> pd.DataFrame | None:
+    """Load pre-computed extractions.
+
+    * Databricks path: read the `facility_extractions` Delta table once via
+      the SQL warehouse and keep it in memory for the lifetime of the
+      process. Requires `DBX_WAREHOUSE_ID` to be set.
+    * Local path: read the parquet cache written by `batch_extract`.
+    """
+    if settings.use_databricks and settings.dbx_warehouse_id:
+        try:
+            from backend.databricks.sql import run_query
+
+            return run_query(
+                f"SELECT * FROM {settings.dbx_full_extractions_table}"
+            )
+        except Exception:
+            # Fall through to parquet cache if warehouse query fails.
+            pass
     if not settings.extractions_path.exists():
         return None
     return pd.read_parquet(settings.extractions_path)

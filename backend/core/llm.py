@@ -1,4 +1,7 @@
-"""Thin OpenAI-compatible LLM client. Provider-agnostic by design."""
+"""LLM client. Dispatches to OpenAI (local dev) or Databricks Model Serving
+(production, when `USE_DATABRICKS=1`). API is identical either way so
+everything upstream of this module is provider-agnostic.
+"""
 from __future__ import annotations
 
 import json
@@ -10,6 +13,10 @@ from backend.config import settings
 
 
 _client: OpenAI | None = None
+
+
+def _use_dbx() -> bool:
+    return bool(settings.use_databricks)
 
 
 def get_client() -> OpenAI:
@@ -29,6 +36,12 @@ def chat_json(
     temperature: float = 0.0,
     max_tokens: int = 800,
 ) -> dict[str, Any]:
+    if _use_dbx():
+        from backend.databricks.llm import chat_json as _dbx_chat_json
+
+        return _dbx_chat_json(
+            prompt, model=model, temperature=temperature, max_tokens=max_tokens
+        )
     """Run a chat completion that must return JSON.
 
     We force `response_format=json_object` so the model returns parseable
@@ -80,6 +93,12 @@ def chat_text(
     max_tokens: int = 400,
 ) -> str:
     """Plain text completion (used by ranking + trace simplification)."""
+    if _use_dbx():
+        from backend.databricks.llm import chat_text as _dbx_chat_text
+
+        return _dbx_chat_text(
+            prompt, model=model, temperature=temperature, max_tokens=max_tokens
+        )
     client = get_client()
     resp = client.chat.completions.create(
         model=model or settings.openai_llm_model,
@@ -92,6 +111,10 @@ def chat_text(
 
 def embed(texts: list[str], *, model: str | None = None, batch_size: int = 256) -> list[list[float]]:
     """Embed a list of texts. Batches automatically."""
+    if _use_dbx():
+        from backend.databricks.llm import embed as _dbx_embed
+
+        return _dbx_embed(texts, model=model, batch_size=min(batch_size, 96))
     client = get_client()
     out: list[list[float]] = []
     model_name = model or settings.openai_embed_model

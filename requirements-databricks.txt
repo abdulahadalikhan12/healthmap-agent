@@ -1,0 +1,6 @@
+# Extra deps needed only when USE_DATABRICKS=1.
+# Install alongside the base requirements.txt:
+#   pip install -r requirements.txt -r requirements-databricks.txt
+databricks-sdk>=0.34
+databricks-vectorsearch>=0.40
+mlflow>=3.0

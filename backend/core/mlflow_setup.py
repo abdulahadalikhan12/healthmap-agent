@@ -1,11 +1,22 @@
 """MLflow setup helpers.
 
+Two modes:
+
+* **Local** (`USE_DATABRICKS=0`): tracking URI from `settings.mlflow_tracking_uri`
+  (defaults to `./mlruns`). Useful for dev runs.
+* **Databricks MLflow 3** (`USE_DATABRICKS=1`): tracking URI set to
+  `databricks`; experiment defaults to `/Shared/<experiment_name>`. Enables
+  GenAI-style traces in the workspace's MLflow Experiments UI.
+
 We log one MLflow run per `/query` call. The orchestrator wraps everything
-in `mlflow.start_run(...)` and uses helpers here to log stages.
+in `mlflow.start_run(...)` and uses helpers here to log stages. When MLflow 3
+is installed we also emit `start_span`-based traces for each stage so the
+Tracing tab shows the tree directly.
 """
 from __future__ import annotations
 
 import json
+import os
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -21,9 +32,35 @@ def init() -> None:
     global _initialized
     if _initialized:
         return
-    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
-    mlflow.set_experiment(settings.mlflow_experiment_name)
+    if settings.use_databricks:
+        if settings.databricks_host:
+            os.environ.setdefault("DATABRICKS_HOST", settings.databricks_host)
+        if settings.databricks_token:
+            os.environ.setdefault("DATABRICKS_TOKEN", settings.databricks_token)
+        mlflow.set_tracking_uri("databricks")
+        exp = settings.mlflow_experiment_name
+        if not exp.startswith("/"):
+            exp = f"/Shared/{exp}"
+        mlflow.set_experiment(exp)
+    else:
+        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+        mlflow.set_experiment(settings.mlflow_experiment_name)
     _initialized = True
+
+
+@contextmanager
+def stage_span(name: str, inputs: dict[str, Any] | None = None) -> Iterator[Any]:
+    """Context manager that opens an MLflow 3 span when available (Tracing UI
+    on Databricks). Becomes a no-op on older MLflow installs."""
+    start_span = getattr(mlflow, "start_span", None)
+    if start_span is None:
+        yield None
+        return
+    try:
+        with start_span(name=name, attributes=inputs or {}) as s:
+            yield s
+    except Exception:
+        yield None
 
 
 @contextmanager

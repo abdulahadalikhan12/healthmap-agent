@@ -34,6 +34,36 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # --- Databricks stack (Mosaic AI Vector Search + Agent Bricks / FM Serving) ---
+    # Flip the orchestrator to the Databricks-hosted path. When False we use
+    # FAISS + OpenAI (old local path) for dev / fallback.
+    use_databricks: bool = False
+    databricks_host: str = ""             # e.g. https://<workspace>.cloud.databricks.com
+    databricks_token: str = ""            # PAT or service principal token
+    dbx_catalog: str = "healthmap"
+    dbx_schema: str = "facilities"
+    dbx_table: str = "facilities"          # Delta table with canonical rows
+    dbx_extractions_table: str = "facility_extractions"  # capability rows
+    dbx_vs_endpoint: str = "healthmap-vs"
+    dbx_vs_index: str = "facilities_vs_index"  # short name; full = catalog.schema.index
+    dbx_vs_primary_key: str = "facility_id"
+    dbx_vs_text_column: str = "notes"
+    dbx_fm_endpoint: str = "databricks-meta-llama-3-1-70b-instruct"
+    dbx_embed_endpoint: str = "databricks-bge-large-en"
+    dbx_warehouse_id: str = ""             # SQL warehouse id for UC SQL queries
+
+    @property
+    def dbx_full_table(self) -> str:
+        return f"{self.dbx_catalog}.{self.dbx_schema}.{self.dbx_table}"
+
+    @property
+    def dbx_full_extractions_table(self) -> str:
+        return f"{self.dbx_catalog}.{self.dbx_schema}.{self.dbx_extractions_table}"
+
+    @property
+    def dbx_full_vs_index(self) -> str:
+        return f"{self.dbx_catalog}.{self.dbx_schema}.{self.dbx_vs_index}"
+
     @property
     def data_root(self) -> Path:
         return PROJECT_ROOT / self.data_dir
